@@ -1,5 +1,7 @@
 <# bootstrap.ps1 - Windows Config Bootstrap Script
 #####################################################
+v0.9.  Untested in the wild.
+
 Run with:
 
 iwr -useb https://raw.githubusercontent.com/dsjstc/bootstraps/main/bootstrap.ps1 | iex
