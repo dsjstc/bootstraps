@@ -226,15 +226,15 @@ function Start-BwAuth {
 
 ### 14. Setup Script Call (Line ~940-954)
 **Problem:** setup.ps1 was attempting elevation.
-**Fix:** Changed bootstrap to call setup.ps1 with `-Opt0` flag:
+**Fix:** Changed bootstrap to call setup.ps1 with `-Option0` flag:
 ```powershell
 # === Run setup.ps1 ===
 if (-not $SkipSetup) {
     Write-Header "Running setup script"
     $SetupScript = Join-Path $ConfigPath "newpc\setup.ps1"
     if (Test-Path $SetupScript) {
-        Write-Log "Running setup.ps1 with -0 option (exit immediately)" -Level "INFO"
-        $setupExitCode = & $SetupScript -Opt0
+        Write-Log "Running setup.ps1 with -Option0 (exit immediately)" -Level "INFO"
+        $setupExitCode = & $SetupScript -Option0
         Write-Log "setup.ps1 exited with code: $setupExitCode" -Level "INFO"
         Write-Ok "setup.ps1 completed."
         Write-Log "setup.ps1 completed successfully" -Level "INFO"
@@ -251,28 +251,23 @@ if (-not $SkipSetup) {
 
 ## Change Log
 
-### 1. Opt0 Parameter (Line ~1)
+### 1. Option0 Parameter (Line ~1)
 **Problem:** setup.ps1 was attempting elevation before processing parameters.
-**Fix:** Added Opt0 parameter and moved param block before self-elevation check:
+**Fix:** Added Option0 parameter and moved param block before self-elevation check:
 ```powershell
 param(
     [switch]$SkipInteractive,
-    [switch]$DryRun,
-    [switch]$Rollback,
-    [string]$RollbackId,
-    [switch]$TestAll,
-    [int]$TestOption,
-    [switch]$ShowState,
-    [switch]$ShowLog,
-    [switch]$All,
-    [switch]$Help,
-    [switch]$Opt0,
-    [switch]$Opt1,
-    # ... other options
+    [switch]$Option0,
+    [switch]$Option1,
+    [switch]$Option2,
+    [switch]$Option3,
+    [switch]$Option4,
+    [switch]$Option5,
+    [switch]$Option6
 )
 
-# Option 0: Exit immediately without elevation (for testing)
-if ($Opt0) {
+# Option 0: Exit immediately without elevation (for testing/bootstrap)
+if ($Option0) {
     Write-Host "Option 0: Exiting immediately without elevation (testing mode)" -ForegroundColor Gray
     exit 0
 }

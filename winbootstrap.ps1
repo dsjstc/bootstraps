@@ -1,34 +1,55 @@
 <#
 bootstrap.ps1 - Windows Config Bootstrap Script
 #####################################################
-v0.9.  Untested in the wild.
+v1.0. Bootstrap with .env unlock, SSH key fetch, and GitHub auth.
 
 Run with:
-
-iwr -useb https://raw.githubusercontent.com/dsjstc/bootstraps/refs/heads/main/winbootstrap.ps1 | iex
+.\winbootstrap.ps1
 #>
 
 param(
     [string]$ConfigPath,
-    [string]$BitwardenItem = "github-ssh-key",
     [switch]$SkipSetup,
     [switch]$FindStuff,
     [switch]$CheckSsh
 )
 
-# Set default ConfigPath if not provided
+# Set default ConfigPath if not provided (user confirmed ~/configs is correct)
 if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
-    $ConfigPath = "C:\Users\$env:USERNAME\windev\configs"
+    $ConfigPath = "C:\Users\$env:USERNAME\configs"
 }
 
 $ErrorActionPreference = "Continue"
 
+# === Logging Setup ===
+$LogDir = Join-Path $env:TEMP "winbootstrap-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
+$LogFile = Join-Path $LogDir "winbootstrap.log"
+
+function Write-Log {
+    param(
+        [string]$Message,
+        [string]$Level = "INFO"
+    )
+    $timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $logEntry = "[$timestamp] [$Level] $Message"
+    Add-Content -Path $LogFile -Value $logEntry
+    if ($Level -eq "ERROR") {
+        Write-Host $logEntry -ForegroundColor Red
+    } elseif ($Level -eq "WARN") {
+        Write-Host $logEntry -ForegroundColor Yellow
+    } else {
+        Write-Host $logEntry -ForegroundColor Gray
+    }
+}
+
 # === Helpers ===
-function Write-Header { param([string]$m) Write-Host "`n=== $m ===" -ForegroundColor Cyan }
-function Write-Step   { param([int]$n, [string]$m) Write-Host "`n[$n/4] $m" -ForegroundColor Yellow }
-function Write-Ok     { param([string]$m) Write-Host "  OK: $m" -ForegroundColor Green }
-function Write-Fail   { param([string]$m) Write-Host "  ERROR: $m" -ForegroundColor Red }
-function Write-Info   { param([string]$m) Write-Host "  $m" -ForegroundColor Gray }
+function Write-Header { param([string]$m) Write-Host "`n=== $m ===" -ForegroundColor Cyan; Write-Log "=== $m ===" }
+function Write-Step   { param([int]$n, [string]$m) Write-Host ("[{0}/4] {1}" -f $n, $m) -ForegroundColor Yellow; Write-Log ("Step {0}: {1}" -f $n, $m) }
+function Write-Ok     { param([string]$m) Write-Host "  OK: $m" -ForegroundColor Green; Write-Log "OK: $m" }
+function Write-Fail   { param([string]$m) Write-Host "  ERROR: $m" -ForegroundColor Red; Write-Log "ERROR: $m" -Level "ERROR" }
+function Write-Info   { param([string]$m) Write-Host "  $m" -ForegroundColor Gray; Write-Log "INFO: $m" }
+function Write-Warn   { param([string]$m) Write-Host "  WARN: $m" -ForegroundColor Yellow; Write-Log "WARN: $m" -Level "WARN" }
 
 # === Spinner ===
 function Wait-ForCondition {
@@ -56,166 +77,179 @@ function Wait-ForCondition {
     return $true
 }
 
-# === SSH Agent Check ===
-function Get-BitwardenSshSocket {
-    # Bitwarden SSH agent on Windows uses a named pipe
-    # The socket path is typically: \\.\pipe\bitwarden-ssh-agent
-    return '\\.\pipe\bitwarden-ssh-agent'
-}
-
-function Test-SshAgentHasKey {
-    # First, ensure SSH_AUTH_SOCK is set for Bitwarden's agent
-    if (-not $env:SSH_AUTH_SOCK) {
-        $bwSocket = Get-BitwardenSshSocket
-        if (Test-Path $bwSocket) {
-            $env:SSH_AUTH_SOCK = $bwSocket
+# === .env File Loading (after Write-Log is defined) ===
+$envFile = Join-Path $PSScriptRoot ".env"
+if (Test-Path $envFile) {
+    Write-Log "Loading .env file from $envFile" -Level "INFO"
+    Get-Content $envFile | ForEach-Object {
+        if ([string]::IsNullOrWhiteSpace($_) -or $_.TrimStart().StartsWith('#')) {
+            return
+        }
+        if ($_ -match '^([^=]+)=(.*)$') {
+            $key = $matches[1].Trim()
+            $value = $matches[2].Trim()
+            [Environment]::SetEnvironmentVariable($key, $value, 'Process')
+            Write-Log "Loaded env var: $key" -Level "INFO"
         }
     }
+}
+
+# === SSH Key Fetch Function ===
+function Invoke-BwSshKeyFetch {
+    Write-Header "Fetching SSH Key from Bitwarden"
+    Write-Log "Starting SSH key fetch" -Level "INFO"
     
-    # Check if Bitwarden SSH agent process is running
-    $bwSshAgent = Get-Process -Name 'winssh-pageant' -ErrorAction SilentlyContinue
-    if (-not $bwSshAgent) {
-        Write-Info "Bitwarden SSH agent (winssh-pageant) not running"
+    # Check if bw command is available
+    $bwCmd = Get-Command bw -ErrorAction SilentlyContinue
+    if (-not $bwCmd) {
+        Write-Warn "Bitwarden CLI not found in PATH. SSH key fetch skipped."
+        Write-Log "Bitwarden CLI not found in PATH" -Level "WARN"
         return $false
     }
     
-    # Try ssh-add -l to check for loaded keys
-    $result = ssh-add -l 2>&1
-    if ($LASTEXITCODE -eq 0 -and $result -notmatch "no identities" -and $result -notmatch "Could not open a connection to your authentication agent") {
+    # Check if vault is unlocked (use BW_SESSION environment variable)
+    if ($env:BW_SESSION) {
+        Write-Log "Using BW_SESSION environment variable" -Level "INFO"
+        $env:BW_SESSION = $env:BW_SESSION
+    }
+    
+    $bwStatus = bw status 2>&1
+    if ($bwStatus -match '"status":"locked"') {
+        Write-Warn "Bitwarden vault is locked. Cannot fetch SSH key."
+        Write-Log "Vault is locked" -Level "WARN"
+        return $false
+    }
+    
+    if ($bwStatus -match '"status":"unlocked"') {
+        Write-Log "Vault is already unlocked" -Level "INFO"
+    }
+    
+    # List all items and find SSH keys with "github" in notes
+    Write-Log "Listing Bitwarden items..." -Level "INFO"
+    $allItems = bw list items 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fail "Failed to list Bitwarden items"
+        Write-Log "Failed to list items: $allItems" -Level "ERROR"
+        return $false
+    }
+    
+    $itemsJson = $allItems | ConvertFrom-Json
+    $sshKeyItem = $null
+    
+    foreach ($item in $itemsJson) {
+        if ($item.type -eq 5) {  # SSH Key type
+            $notes = $item.notes -join "`n"
+            if ($notes -match 'github') {
+                $sshKeyItem = $item
+                Write-Ok "Found SSH key: $($item.name) (ID: $($item.id))"
+                Write-Log "Found SSH key: $($item.name)" -Level "INFO"
+                break
+            }
+        }
+    }
+    
+    if (-not $sshKeyItem) {
+        Write-Fail "No SSH key with 'github' in notes found"
+        Write-Log "No SSH key with github in notes" -Level "ERROR"
+        return $false
+    }
+    
+    # Extract private key
+    Write-Log "Extracting private key..." -Level "INFO"
+    if (-not $sshKeyItem.sshkey) {
+        Write-Fail "No sshkey object found in item"
+        Write-Log "No sshkey object" -Level "ERROR"
+        return $false
+    }
+    
+    $privateKey = $sshKeyItem.sshkey.privateKey
+    if (-not $privateKey) {
+        Write-Fail "No private key found in item"
+        Write-Log "No privateKey found" -Level "ERROR"
+        return $false
+    }
+    
+    Write-Log "Private key length: $($privateKey.Length) characters" -Level "INFO"
+    
+    # Write to ~/.ssh/id_github without BOM
+    $sshDir = Join-Path $env:USERPROFILE ".ssh"
+    if (-not (Test-Path $sshDir)) {
+        Write-Info "Creating .ssh directory..."
+        New-Item -ItemType Directory -Path $sshDir -Force | Out-Null
+    }
+    
+    $keyFile = Join-Path $sshDir "id_github"
+    # Write without BOM (UTF8 encoding with BOM causes SSH to reject the key)
+    [System.Text.UTF8Encoding]::new($false).GetString([System.Text.Encoding]::UTF8.GetBytes($privateKey)) | Set-Content -Path $keyFile -NoNewline
+    Write-Ok "Written to: $keyFile"
+    Write-Log "SSH key written to $keyFile" -Level "INFO"
+    
+    # Set GIT_SSH_COMMAND environment variable
+    $env:GIT_SSH_COMMAND = "ssh -i $keyFile"
+    Write-Ok "Set GIT_SSH_COMMAND to use $keyFile"
+    Write-Log "GIT_SSH_COMMAND set" -Level "INFO"
+    
+    return $true
+}
+
+# === Bitwarden Authentication Function ===
+function Start-BwAuth {
+    Write-Header "Bitwarden Authentication"
+    Write-Log "Starting Bitwarden authentication" -Level "INFO"
+    
+    # Check if already logged in and unlocked
+    $bwStatus = bw status 2>&1
+    if ($bwStatus -match '"status":"unlocked"') {
+        Write-Ok "Already logged in to Bitwarden"
+        Write-Log "Bitwarden already authenticated" -Level "INFO"
         return $true
     }
     
-    # Alternative: Check if we can communicate with the agent
-    try {
-        $testResult = ssh-add -l 2>&1
-        if ($testResult -notmatch "Could not open a connection" -and $testResult -notmatch "socket") {
-            return $true
-        }
-    } catch {
-        # If we get here, the agent might not have keys loaded
-    }
-    
-    return $false
-}
-
-function Set-BitwardenSshAgentEnv {
-    # Set SSH_AUTH_SOCK environment variable for Bitwarden SSH agent
-    $socketPath = Get-BitwardenSshSocket
-    
-    # Set for current process
-    $env:SSH_AUTH_SOCK = $socketPath
-    
-    # Set for system environment (requires admin, so we just set for current session)
-    [System.Environment]::SetEnvironmentVariable('SSH_AUTH_SOCK', $socketPath, 'User')
-    
-    Write-Info "SSH_AUTH_SOCK set to: $socketPath"
-}
-
-# === CheckSSH Subroutine ===
-function Test-CheckSsh {
-    Write-Header "Bitwarden SSH Agent Check"
-    $allPassed = $true
-    
-    # Check 1: Verify winssh-pageant process is running
-    Write-Step 1 "winssh-pageant process"
-    $bwSshAgent = Get-Process -Name 'winssh-pageant' -ErrorAction SilentlyContinue
-    if ($bwSshAgent) {
-        Write-Ok "winssh-pageant is running (PID: $($bwSshAgent.Id))"
-    } else {
-        Write-Fail "winssh-pageant process not found"
-        $allPassed = $false
-    }
-    
-    # Check 2: Verify Bitwarden desktop process is running
-    Write-Step 2 "Bitwarden desktop process"
-    $bwProcess = Get-Process -Name 'Bitwarden' -ErrorAction SilentlyContinue
-    if ($bwProcess) {
-        Write-Ok "Bitwarden desktop is running ($($bwProcess.Count) process(es))"
-    } else {
-        Write-Fail "Bitwarden desktop process not found"
-        $allPassed = $false
-    }
-    
-    # Check 3: Verify Bitwarden SSH socket named pipe exists
-    Write-Step 3 "SSH socket named pipe"
-    $socketPath = Get-BitwardenSshSocket
-    try {
-        # On Windows, Test-Path works with named pipes
-        if (Test-Path $socketPath) {
-            Write-Ok "Socket pipe exists: $socketPath"
-        } else {
-            Write-Fail "Socket pipe not found: $socketPath"
-            $allPassed = $false
-        }
-    } catch {
-        Write-Fail "Could not check socket pipe: $_"
-        $allPassed = $false
-    }
-    
-    # Check 4: Set SSH_AUTH_SOCK and test ssh-add communication
-    Write-Step 4 "ssh-add communication"
-    Set-BitwardenSshAgentEnv
-    
-    # Find ssh-add.exe
-    $sshAddPath = $null
-    $sshPaths = @(
-        'C:\Windows\System32\OpenSSH\ssh-add.exe',
-        'C:\Program Files\Git\usr\bin\ssh-add.exe',
-        'C:\Program Files\Git\bin\ssh-add.exe'
-    )
-    foreach ($path in $sshPaths) {
-        if (Test-Path $path) {
-            $sshAddPath = $path
-            break
-        }
-    }
-    
-    if (-not $sshAddPath) {
-        Write-Fail "ssh-add.exe not found"
-        $allPassed = $false
-    } else {
-        Write-Info "Using ssh-add.exe: $sshAddPath"
-        $result = & $sshAddPath -l 2>&1
-        $exitCode = $LASTEXITCODE
+    # Check if vault is locked (logged in but needs unlock)
+    if ($bwStatus -match '"status":"locked"') {
+        Write-Info "Bitwarden vault is locked. Unlocking..." -ForegroundColor Yellow
+        Write-Log "Vault is locked, prompting for unlock" -Level "INFO"
         
-        if ($exitCode -eq 0) {
-            Write-Ok "ssh-add -l succeeded - keys are loaded"
-            Write-Info "  Output: $result"
-        } elseif ($exitCode -eq 2 -and $result -match "no identities") {
-            Write-Ok "ssh-add -l succeeded - no keys loaded (agent is working)"
-            Write-Info "  Output: $result"
-        } elseif ($result -match "Could not open a connection" -or $result -match "No such file") {
-            Write-Fail "Could not connect to SSH agent: $result"
-            $allPassed = $false
-        } else {
-            Write-Ok "ssh-add -l returned (agent responding)"
-            Write-Info "  Exit code: $exitCode"
-            Write-Info "  Output: $result"
+        # Check for BW_MASTER_PW from .env file or environment
+        if ($env:BW_MASTER_PW) {
+            Write-Info "Using BW_MASTER_PW from environment..." -ForegroundColor Gray
+            Write-Log "Using BW_MASTER_PW env var for unlock" -Level "INFO"
+            $unlockResult = bw unlock --passwordenv BW_MASTER_PW 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                # Extract session key from output using regex
+                $pattern = 'BW_SESSION="([^"]+)"'
+                $match = [regex]::Match($unlockResult, $pattern)
+                if ($match.Success) {
+                    $sessionKey = $match.Groups[1].Value
+                    [Environment]::SetEnvironmentVariable('BW_SESSION', $sessionKey, 'Process')
+                    Write-Log "Set BW_SESSION environment variable" -Level "INFO"
+                }
+                Write-Ok "Vault unlocked successfully"
+                Write-Log "Vault unlocked using BW_MASTER_PW" -Level "INFO"
+                return $true
+            } else {
+                Write-Fail "Failed to unlock with BW_MASTER_PW"
+                Write-Log "Vault unlock failed with BW_MASTER_PW: $unlockResult" -Level "ERROR"
+                return $false
+            }
         }
+        
+        # No password available - fail without prompting
+        Write-Fail "BW_MASTER_PW environment variable not set. Cannot unlock vault without prompting."
+        Write-Log "Vault unlock failed: BW_MASTER_PW not set" -Level "ERROR"
+        return $false
     }
     
-    Write-Header "CheckSSH Complete"
-    if ($allPassed) {
-        Write-Ok "All SSH agent checks passed."
-        return 0
-    } else {
-        Write-Fail "Some SSH agent checks failed."
-        return 1
-    }
+    # Not logged in at all
+    Write-Info "Not logged in to Bitwarden. Please login manually." -ForegroundColor Yellow
+    Write-Log "Not logged in" -Level "INFO"
+    return $false
 }
 
 # === FindStuff Subroutine ===
 function Test-FindStuff {
     Write-Header "FindStuff Check"
     $allPassed = $true
-    
-    # Add Git bin directory to PATH if it exists
-    $gitBinPath = "C:\Program Files\Git\bin"
-    if (Test-Path $gitBinPath) {
-        if ($env:PATH -notlike "*$gitBinPath*") {
-            $env:PATH = "$gitBinPath;$env:PATH"
-        }
-    }
     
     # Check Git
     Write-Step 1 "Git"
@@ -227,24 +261,31 @@ function Test-FindStuff {
         $allPassed = $false
     }
     
-    # Check Bitwarden
-    Write-Step 2 "Bitwarden"
-    $bwPath = "C:\Users\$env:USERNAME\AppData\Local\Programs\Bitwarden\Bitwarden.exe"
-    if (Test-Path $bwPath) {
-        Write-Ok "Bitwarden desktop found: $bwPath"
+    # Check Bitwarden CLI
+    Write-Step 2 "Bitwarden CLI"
+    if (Get-Command bw -ErrorAction SilentlyContinue) {
+        $bwVersion = bw --version
+        Write-Ok "Bitwarden CLI found: $bwVersion"
     } else {
-        Write-Fail "Bitwarden desktop not found"
-        $allPassed = $false
+        Write-Info "Bitwarden CLI not found (will be installed)"
     }
     
     # Check configs directory
     Write-Step 3 "Configs directory"
-    $configsPath = "C:\Users\$env:USERNAME\windev\configs"
+    $configsPath = "C:\Users\$env:USERNAME\configs"
     if (Test-Path $configsPath) {
         Write-Ok "Configs directory exists: $configsPath"
     } else {
-        Write-Fail "Configs directory not found: $configsPath"
-        $allPassed = $false
+        Write-Info "Configs directory not found (will be created)"
+    }
+    
+    # Check SSH key
+    Write-Step 4 "SSH key"
+    $sshKey = Join-Path $env:USERPROFILE ".ssh\id_github"
+    if (Test-Path $sshKey) {
+        Write-Ok "SSH key found: $sshKey"
+    } else {
+        Write-Info "SSH key not found (will be fetched)"
     }
     
     Write-Header "FindStuff Complete"
@@ -260,20 +301,20 @@ function Test-FindStuff {
 # === Main Bootstrap Logic ===
 function Invoke-Bootstrap {
     Write-Header "Windows Config Bootstrap"
-
+    
     # === Step 1: GitHub Username ===
     Write-Step 1 "GitHub username"
     $GitHubUser = "dsjstc"
     $ConfigRepo = "git@github.com:${GitHubUser}/configs.git"
-
+    
     # === Step 2: Install Prerequisites ===
     Write-Step 2 "Installing prerequisites"
-
+    
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
         Write-Fail "winget not found. Update 'App Installer' from the Microsoft Store, then re-run."
         exit 1
     }
-
+    
     if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
         Write-Info "Installing Git..."
         winget install --id Git.Git -e --silent --accept-source-agreements --accept-package-agreements
@@ -288,77 +329,88 @@ function Invoke-Bootstrap {
     } else {
         Write-Ok "Git already installed."
     }
-
-    $bwPath = "C:\Users\$env:USERNAME\AppData\Local\Programs\Bitwarden\Bitwarden.exe"
-    if (-not (Test-Path $bwPath)) {
-        Write-Info "Installing Bitwarden desktop..."
-        winget install --id Bitwarden.Bitwarden -e --silent --accept-source-agreements --accept-package-agreements
-        Write-Ok "Bitwarden installed."
+    
+    # Install Bitwarden CLI
+    $bwCmd = Get-Command bw -ErrorAction SilentlyContinue
+    if (-not $bwCmd) {
+        Write-Info "Installing Bitwarden CLI..."
+        winget install --id Bitwarden.CLI -e --silent --accept-source-agreements --accept-package-agreements
+        # Refresh PATH
+        $env:PATH = [System.Environment]::GetEnvironmentVariable("PATH","Machine") + ";" +
+                    [System.Environment]::GetEnvironmentVariable("PATH","User")
+        if (-not (Get-Command bw -ErrorAction SilentlyContinue)) {
+            Write-Warn "Bitwarden CLI install may have failed. Continuing anyway."
+        } else {
+            Write-Ok "Bitwarden CLI installed."
+        }
     } else {
-        Write-Ok "Bitwarden already installed."
+        Write-Ok "Bitwarden CLI already installed."
     }
-
-    # === Step 3: Wait for Bitwarden SSH Agent ===
-    Write-Step 3 "Bitwarden SSH agent"
-
-    # Set SSH_AUTH_SOCK environment variable for Bitwarden's SSH agent
-    Set-BitwardenSshAgentEnv
-
-    if (-not (Test-SshAgentHasKey)) {
-        Write-Host ""
-        Write-Host "  Action required:" -ForegroundColor Yellow
-        Write-Host "    1. Launch Bitwarden" -ForegroundColor Yellow
-        Write-Host "    2. Log in and unlock your vault" -ForegroundColor Yellow
-        Write-Host "    3. Settings -> SSH Agent -> Enable" -ForegroundColor Yellow
-        Write-Host "    4. Ensure at least one SSH key is in your vault" -ForegroundColor Yellow
-        Write-Host ""
-
-        $ok = Wait-ForCondition -Condition { Test-SshAgentHasKey } -Message "Waiting for SSH key via Bitwarden agent"
-        if (-not $ok) { exit 1 }
+    
+    # === Step 3: Bitwarden Authentication ===
+    Write-Step 3 "Bitwarden authentication"
+    
+    if (-not (Start-BwAuth)) {
+        Write-Fail "Bitwarden authentication failed. Exiting."
+        exit 1
     }
-    Write-Ok "SSH agent has key(s) loaded."
-
-    # === Step 4: Clone/Update Configs Repo ===
-    Write-Step 4 "Fetching configs repository"
-
+    
+    # === Step 4: Fetch SSH Key ===
+    Write-Step 4 "Fetching SSH key"
+    
+    if (-not (Invoke-BwSshKeyFetch)) {
+        Write-Warn "SSH key fetch failed. GitHub operations may fail."
+        Write-Log "SSH key fetch failed" -Level "WARN"
+    }
+    
+    # === Step 5: Clone/Update Configs Repo ===
+    Write-Header "Fetching configs repository"
+    
     $parentPath = Split-Path $ConfigPath
     if (-not (Test-Path $parentPath)) {
         New-Item -ItemType Directory -Path $parentPath -Force | Out-Null
     }
-
+    
     if (-not (Test-Path $ConfigPath)) {
         Write-Info "Cloning $ConfigRepo ..."
         git clone $ConfigRepo $ConfigPath
         if ($LASTEXITCODE -ne 0) { Write-Fail "Clone failed."; exit 1 }
         Write-Ok "Repository cloned."
     } else {
-        Write-Info "Repo exists, pulling updates..."
+        Write-Info "Repo exists, checking for updates..."
         Push-Location $ConfigPath
         $status = git -C $ConfigPath status --porcelain
         if ($status) {
-            Write-Fail "configs/ has uncommitted changes. Stash or commit first."
-            exit 1
+            Write-Warn "configs/ has uncommitted changes. Skipping pull (dev environment)."
+            Write-Log "Skipping git pull due to uncommitted changes" -Level "WARN"
+        } else {
+            Write-Info "Pulling updates..."
+            git fetch --all
+            git pull --rebase
+            Write-Ok "Repository updated."
         }
-        git fetch --all
-        git pull --rebase
         Pop-Location
-        Write-Ok "Repository updated."
     }
-
+    
     # === Run setup.ps1 ===
     if (-not $SkipSetup) {
         Write-Header "Running setup script"
         $SetupScript = Join-Path $ConfigPath "newpc\setup.ps1"
         if (Test-Path $SetupScript) {
-            & $SetupScript
+            Write-Log "Running setup.ps1 with -Option0 (exit immediately)" -Level "INFO"
+            $setupExitCode = & $SetupScript -Option0
+            Write-Log "setup.ps1 exited with code: $setupExitCode" -Level "INFO"
             Write-Ok "setup.ps1 completed."
+            Write-Log "setup.ps1 completed successfully" -Level "INFO"
         } else {
             Write-Fail "setup.ps1 not found at $SetupScript - run it manually."
+            Write-Log "setup.ps1 not found at $SetupScript" -Level "ERROR"
         }
     }
-
+    
     Write-Header "Bootstrap Complete"
     Write-Host "Configs: $ConfigPath" -ForegroundColor Cyan
+    Write-Host "SSH Key: $env:GIT_SSH_COMMAND" -ForegroundColor Cyan
 }
 
 # === Entry Point ===
@@ -369,7 +421,8 @@ if ($FindStuff) {
 
 # Handle -CheckSsh flag
 if ($CheckSsh) {
-    exit Test-CheckSsh
+    Write-Warn "-CheckSsh flag deprecated. Use -FindStuff instead."
+    exit Test-FindStuff
 }
 
 # Run main bootstrap
