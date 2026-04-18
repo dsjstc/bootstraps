@@ -11,7 +11,8 @@ param(
     [string]$ConfigPath,
     [switch]$SkipSetup,
     [switch]$FindStuff,
-    [switch]$CheckSsh
+    [switch]$CheckSsh,
+    [switch]$TestMode
 )
 
 # Set default ConfigPath if not provided (user confirmed ~/configs is correct)
@@ -50,6 +51,13 @@ function Write-Ok     { param([string]$m) Write-Host "  OK: $m" -ForegroundColor
 function Write-Fail   { param([string]$m) Write-Host "  ERROR: $m" -ForegroundColor Red; Write-Log "ERROR: $m" -Level "ERROR" }
 function Write-Info   { param([string]$m) Write-Host "  $m" -ForegroundColor Gray; Write-Log "INFO: $m" }
 function Write-Warn   { param([string]$m) Write-Host "  WARN: $m" -ForegroundColor Yellow; Write-Log "WARN: $m" -Level "WARN" }
+
+# === Pause Function ===
+function Write-Pause {
+    Write-Host ""
+    Write-Host "Press any key to exit..." -ForegroundColor Yellow
+    $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+}
 
 # === Spinner ===
 function Wait-ForCondition {
@@ -312,6 +320,7 @@ function Invoke-Bootstrap {
     
     if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
         Write-Fail "winget not found. Update 'App Installer' from the Microsoft Store, then re-run."
+        Write-Pause
         exit 1
     }
     
@@ -323,6 +332,7 @@ function Invoke-Bootstrap {
                     [System.Environment]::GetEnvironmentVariable("PATH","User")
         if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
             Write-Fail "Git install failed. Exiting."
+            Write-Pause
             exit 1
         }
         Write-Ok "Git installed."
@@ -352,6 +362,7 @@ function Invoke-Bootstrap {
     
     if (-not (Start-BwAuth)) {
         Write-Fail "Bitwarden authentication failed. Exiting."
+        Write-Pause
         exit 1
     }
     
@@ -371,11 +382,22 @@ function Invoke-Bootstrap {
         New-Item -ItemType Directory -Path $parentPath -Force | Out-Null
     }
     
+    # TestMode: Use a public test repo instead of configs
+    $TestRepo = "https://github.com/octocat/Hello-World.git"
+    $TestPath = "C:\Users\$env:USERNAME\test-repo"
+    
     if (-not (Test-Path $ConfigPath)) {
-        Write-Info "Cloning $ConfigRepo ..."
-        git clone $ConfigRepo $ConfigPath
-        if ($LASTEXITCODE -ne 0) { Write-Fail "Clone failed."; exit 1 }
-        Write-Ok "Repository cloned."
+        if ($TestMode) {
+            Write-Info "TestMode: Cloning test repo $TestRepo to $TestPath ..."
+            git clone $TestRepo $TestPath
+            if ($LASTEXITCODE -ne 0) { Write-Fail "Clone failed."; Write-Pause; exit 1 }
+            Write-Ok "Test repository cloned."
+        } else {
+            Write-Info "Cloning $ConfigRepo ..."
+            git clone $ConfigRepo $ConfigPath
+            if ($LASTEXITCODE -ne 0) { Write-Fail "Clone failed."; Write-Pause; exit 1 }
+            Write-Ok "Repository cloned."
+        }
     } else {
         Write-Info "Repo exists, checking for updates..."
         Push-Location $ConfigPath
@@ -411,18 +433,31 @@ function Invoke-Bootstrap {
     Write-Header "Bootstrap Complete"
     Write-Host "Configs: $ConfigPath" -ForegroundColor Cyan
     Write-Host "SSH Key: $env:GIT_SSH_COMMAND" -ForegroundColor Cyan
+    Write-Pause
 }
 
 # === Entry Point ===
+# Handle -TestMode flag
+if ($TestMode) {
+    Write-Header "TestMode: Testing network connectivity"
+    Write-Info "This will clone a public test repo instead of configs"
+    Invoke-Bootstrap
+    exit 0
+}
+
 # Handle -FindStuff flag
 if ($FindStuff) {
-    exit Test-FindStuff
+    $result = Test-FindStuff
+    Write-Pause
+    exit $result
 }
 
 # Handle -CheckSsh flag
 if ($CheckSsh) {
     Write-Warn "-CheckSsh flag deprecated. Use -FindStuff instead."
-    exit Test-FindStuff
+    $result = Test-FindStuff
+    Write-Pause
+    exit $result
 }
 
 # Run main bootstrap
