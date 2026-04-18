@@ -13,80 +13,8 @@ param(
     [string]$BitwardenItem = "github-ssh-key",
     [switch]$SkipSetup,
     [switch]$FindStuff,
-    [switch]$CheckSsh,
-    [switch]$EnablePolicy
+    [switch]$CheckSsh
 )
-
-# === Logging ===
-$LogDir = "$env:TEMP\winbootstrap-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
-New-Item -ItemType Directory -Path $LogDir -Force | Out-Null
-$LogPath = Join-Path $LogDir "winbootstrap.log"
-
-function Write-Log {
-    param([string]$Message, [string]$Level = "INFO")
-    $Timestamp = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    $LogLine = "[$Timestamp] [$Level] $Message"
-    Add-Content -Path $LogPath -Value $LogLine
-    if ($Level -eq "ERROR") {
-        Write-Host $LogLine -ForegroundColor Red
-    } elseif ($Level -eq "WARN") {
-        Write-Host $LogLine -ForegroundColor Yellow
-    } else {
-        Write-Host $LogLine -ForegroundColor Gray
-    }
-}
-
-function Write-Header { param([string]$m) Write-Log "=== $m ===" -Level "INFO"; Write-Host "`n=== $m ===" -ForegroundColor Cyan }
-function Write-Step   { param([int]$n, [string]$m) Write-Log "[$n/4] $m" -Level "INFO"; Write-Host "`n[$n/4] $m" -ForegroundColor Yellow }
-function Write-Ok     { param([string]$m) Write-Log "OK: $m" -Level "INFO"; Write-Host "  OK: $m" -ForegroundColor Green }
-function Write-Fail   { param([string]$m) Write-Log "ERROR: $m" -Level "ERROR"; Write-Host "  ERROR: $m" -ForegroundColor Red }
-function Write-Info   { param([string]$m) Write-Log "  $m" -Level "INFO"; Write-Host "  $m" -ForegroundColor Gray }
-
-# Log location for diagnostics
-Write-Log "Bootstrap started" -Level "INFO"
-Write-Host "`nLog: $LogPath" -ForegroundColor Cyan
-Write-Host "Copy this path to share logs with support." -ForegroundColor Gray
-
-# === Enable Execution Policy ===
-if ($EnablePolicy) {
-    Write-Header "Enabling PowerShell Execution Policy"
-    
-    $regContent = @"
-Windows Registry Editor Version 5.00
-
-[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\PowerShell\1\ShellIds\MicrosoftPowerShell]
-"ExecutionPolicy"="Bypass"
-
-[HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\PowerShell\1\ShellIds\MicrosoftPowerShell]
-"ExecutionPolicy"="Bypass"
-
-[HKEY_CURRENT_USER\SOFTWARE\Microsoft\PowerShell\1\ShellIds\MicrosoftPowerShell]
-"ExecutionPolicy"="Bypass"
-
-[HKEY_CURRENT_USER\SOFTWARE\Wow6432Node\Microsoft\PowerShell\1\ShellIds\MicrosoftPowerShell]
-"ExecutionPolicy"="Bypass"
-
-[HKEY_LOCAL_MACHINE\SOFTWARE\PowerShell\6\ShellIds\MicrosoftPowerShell]
-"ExecutionPolicy"="Bypass"
-
-[HKEY_LOCAL_MACHINE\SOFTWARE\PowerShell\7\ShellIds\MicrosoftPowerShell]
-"ExecutionPolicy"="Bypass"
-
-[HKEY_CURRENT_USER\SOFTWARE\PowerShell\6\ShellIds\MicrosoftPowerShell]
-"ExecutionPolicy"="Bypass"
-
-[HKEY_CURRENT_USER\SOFTWARE\PowerShell\7\ShellIds\MicrosoftPowerShell]
-"ExecutionPolicy"="Bypass"
-"@
-
-    $regFile = "$env:TEMP\enable-ps1.reg"
-    $regContent | Set-Content $regFile -Encoding ASCII
-    Start-Process -FilePath reg.exe -ArgumentList "import", $regFile -Wait
-    Remove-Item $regFile -Force
-    Write-Ok "Execution policy enabled. Reboot required."
-    Write-Log "Bootstrap completed (EnablePolicy mode)" -Level "INFO"
-    exit 0
-}
 
 # Set default ConfigPath if not provided
 if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
@@ -431,25 +359,17 @@ function Invoke-Bootstrap {
 
     Write-Header "Bootstrap Complete"
     Write-Host "Configs: $ConfigPath" -ForegroundColor Cyan
-    Write-Log "Bootstrap completed successfully" -Level "INFO"
-    Write-Log "Log file: $LogPath" -Level "INFO"
-    Write-Host "`nLog: $LogPath" -ForegroundColor Cyan
-    Write-Host "Copy this path to share logs with support." -ForegroundColor Gray
 }
 
 # === Entry Point ===
 # Handle -FindStuff flag
 if ($FindStuff) {
-    $result = Test-FindStuff
-    Write-Log "FindStuff completed with exit code: $result" -Level "INFO"
-    exit $result
+    exit Test-FindStuff
 }
 
 # Handle -CheckSsh flag
 if ($CheckSsh) {
-    $result = Test-CheckSsh
-    Write-Log "CheckSsh completed with exit code: $result" -Level "INFO"
-    exit $result
+    exit Test-CheckSsh
 }
 
 # Run main bootstrap

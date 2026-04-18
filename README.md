@@ -20,7 +20,7 @@ Main bootstrap script that:
 
 #### Usage
 
-**Single-paste on virgin PC:**
+**Single-paste on virgin PC (execution policy bypass):**
 ```powershell
 iwr -useb https://raw.githubusercontent.com/dsjstc/bootstraps/refs/heads/main/winbootstrap.ps1 | iex
 ```
@@ -38,6 +38,48 @@ iwr -useb https://raw.githubusercontent.com/dsjstc/bootstraps/refs/heads/main/wi
 **Find installed tools:**
 ```powershell
 iwr -useb https://raw.githubusercontent.com/dsjstc/bootstraps/refs/heads/main/winbootstrap.ps1 | iex -FindStuff
+```
+
+#### Running from Local Copy / Network Drive
+
+If you have the configs repo mapped as a network drive:
+
+```powershell
+# Map drive (example)
+net use Z: \\server\share\configs
+
+# Run from local copy
+Z:\bootstraps\winbootstrap.ps1
+
+# With EnablePolicy
+Z:\bootstraps\winbootstrap.ps1 -EnablePolicy
+
+# With custom config path
+Z:\bootstraps\winbootstrap.ps1 -ConfigPath "C:\Users\$env:USERNAME\windev\configs"
+```
+
+**PowerShell execution policy workaround:**
+```powershell
+# Run with bypass for this session only
+powershell -ExecutionPolicy Bypass -File Z:\bootstraps\winbootstrap.ps1
+
+# Or with EnablePolicy
+powershell -ExecutionPolicy Bypass -File Z:\bootstraps\winbootstrap.ps1 -EnablePolicy
+```
+
+#### Troubleshooting
+
+**"Parameter cannot be found" error:**
+- Clear PowerShell cache: `$PSDefaultParameterValues.Clear()`
+- Use explicit file fetch:
+  ```powershell
+  iwr -useb https://raw.githubusercontent.com/dsjstc/bootstraps/refs/heads/main/winbootstrap.ps1 -OutFile "$env:TEMP\wb.ps1"
+  & "$env:TEMP\wb.ps1" -EnablePolicy
+  ```
+
+**Execution policy blocked:**
+```powershell
+powershell -ExecutionPolicy Bypass -File .\winbootstrap.ps1
 ```
 
 ## Updating
