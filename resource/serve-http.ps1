@@ -32,7 +32,7 @@
 
 param(
     [int]$Port = 8080,
-    [string]$Bind = '127.0.0.1',
+    [string]$Bind = '0.0.0.0',
     [string]$Root = $PWD.Path
 )
 
@@ -90,113 +90,115 @@ function Get-MimeType {
 # === Handle Requests ===
 try {
     while ($true) {
-        $client = $listener.AcceptTcpClient()
-        $stream = $client.GetStream()
-        $stream.ReadTimeout = 10000
-        
-        # Read request - read in chunks until we get CRLF CRLF (end of headers)
-        $requestBytes = New-Object byte[] 65536
-        $totalRead = 0
-        $headerComplete = $false
-        
-        # Read in chunks of 1024 bytes for efficiency
-        while (-not $headerComplete -and $totalRead -lt 65536) {
-            $bytesRead = $stream.Read($requestBytes, $totalRead, 1024)
-            if ($bytesRead -eq 0) {
-                # Connection closed by client
-                $stream.Close()
-                $client.Close()
-                break
-            }
-            $totalRead += $bytesRead
+        $client = $null
+        $stream = $null
+        try {
+            $client = $listener.AcceptTcpClient()
+            $stream = $client.GetStream()
+            $stream.ReadTimeout = 10000
             
-            # Check for CRLF CRLF (0x0D 0x0A 0x0D 0x0A)
-            if ($totalRead -ge 4) {
-                $idx = $totalRead - 1
-                if ($requestBytes[$idx] -eq 0x0A -and 
-                    $requestBytes[$idx-1] -eq 0x0D -and
-                    $requestBytes[$idx-2] -eq 0x0A -and
-                    $requestBytes[$idx-3] -eq 0x0D) {
-                    $headerComplete = $true
+            # Read request - read in chunks until we get CRLF CRLF (end of headers)
+            $requestBytes = New-Object byte[] 65536
+            $totalRead = 0
+            $headerComplete = $false
+            
+            # Read in chunks of 1024 bytes for efficiency
+            while (-not $headerComplete -and $totalRead -lt 65536) {
+                $bytesRead = $stream.Read($requestBytes, $totalRead, 1024)
+                if ($bytesRead -eq 0) {
+                    # Connection closed by client
+                    $stream.Dispose()
+                    $client.Dispose()
+                    break
+                }
+                $totalRead += $bytesRead
+                
+                # Check for CRLF CRLF (0x0D 0x0A 0x0D 0x0A)
+                if ($totalRead -ge 4) {
+                    $idx = $totalRead - 1
+                    if ($requestBytes[$idx] -eq 0x0A -and
+                        $requestBytes[$idx-1] -eq 0x0D -and
+                        $requestBytes[$idx-2] -eq 0x0A -and
+                        $requestBytes[$idx-3] -eq 0x0D) {
+                        $headerComplete = $true
+                    }
                 }
             }
-        }
-        
-        if (-not $headerComplete) {
-            # Could not parse headers
-            $response = "HTTP/1.1 400 Bad Request`r`nContent-Type: text/plain`r`nContent-Length: 11`r`nConnection: close`r`n`r`nBad Request"
-            $responseBytes = [System.Text.Encoding]::ASCII.GetBytes($response)
-            $stream.Write($responseBytes, 0, $responseBytes.Length)
-            $stream.Close()
-            $client.Close()
-            continue
-        }
-        
-        $requestText = [System.Text.Encoding]::ASCII.GetString($requestBytes, 0, $totalRead).Trim()
-        $requestLine = $requestText.Split("`r`n")[0]
-        $parts = $requestLine.Split(' ')
-        
-        if ($parts.Length -lt 2) {
-            $response = "HTTP/1.1 400 Bad Request`r`nContent-Type: text/plain`r`nContent-Length: 11`r`nConnection: close`r`n`r`nBad Request"
-            $responseBytes = [System.Text.Encoding]::ASCII.GetBytes($response)
-            $stream.Write($responseBytes, 0, $responseBytes.Length)
-            $stream.Close()
-            $client.Close()
-            continue
-        }
-        
-        $method = $parts[0]
-        $url = $parts[1]
-        
-        Write-Host "[INFO] Request: $method $url" -ForegroundColor Gray
-        
-        # Map URL to file path
-        $filePath = Join-Path $Root ($url -replace '^\/*', '')
-        
-        # Security: Ensure resolved path is within root directory
-        $resolvedPath = (Get-Item $filePath).FullName
-        $rootPath = (Get-Item $Root).FullName
-        if (-not $resolvedPath.StartsWith($rootPath)) {
-            Write-Host "[WARN] Blocked directory traversal attempt: $url" -ForegroundColor Yellow
-            $response = "HTTP/1.1 403 Forbidden`r`nContent-Type: text/plain`r`nContent-Length: 9`r`nConnection: close`r`n`r`nForbidden"
-            $responseBytes = [System.Text.Encoding]::ASCII.GetBytes($response)
-            $stream.Write($responseBytes, 0, $responseBytes.Length)
-            $stream.Close()
-            $client.Close()
-            continue
-        }
-        
-        if (Test-Path $filePath -PathType Leaf) {
-            $content = Get-Content $filePath -Raw -Encoding UTF8
-            $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($content)
-            $contentType = Get-MimeType $filePath
             
-            $response = "HTTP/1.1 200 OK`r`n"
-            $response += "Content-Type: $contentType`r`n"
-            $response += "Content-Length: $($bodyBytes.Length)`r`n"
-            $response += "Connection: close`r`n"
-            $response += "`r`n"
+            if (-not $headerComplete) {
+                # Could not parse headers
+                $response = "HTTP/1.1 400 Bad Request`r`nContent-Type: text/plain`r`nContent-Length: 11`r`nConnection: close`r`n`r`nBad Request"
+                $responseBytes = [System.Text.Encoding]::ASCII.GetBytes($response)
+                try { $stream.Write($responseBytes, 0, $responseBytes.Length) } catch {}
+                continue
+            }
             
-            $responseBytes = [System.Text.Encoding]::ASCII.GetBytes($response)
-            $stream.Write($responseBytes, 0, $responseBytes.Length)
-            $stream.Write($bodyBytes, 0, $bodyBytes.Length)
-        } else {
-            $body = "File not found: $url"
-            $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
+            $requestText = [System.Text.Encoding]::ASCII.GetString($requestBytes, 0, $totalRead)
+            $requestLine = $requestText.Split("`r`n")[0]
+            $parts = $requestLine.Split(' ')
             
-            $response = "HTTP/1.1 404 Not Found`r`n"
-            $response += "Content-Type: text/plain`r`n"
-            $response += "Content-Length: $($bodyBytes.Length)`r`n"
-            $response += "Connection: close`r`n"
-            $response += "`r`n"
+            if ($parts.Length -lt 2) {
+                $response = "HTTP/1.1 400 Bad Request`r`nContent-Type: text/plain`r`nContent-Length: 11`r`nConnection: close`r`n`r`nBad Request"
+                $responseBytes = [System.Text.Encoding]::ASCII.GetBytes($response)
+                try { $stream.Write($responseBytes, 0, $responseBytes.Length) } catch {}
+                continue
+            }
             
-            $responseBytes = [System.Text.Encoding]::ASCII.GetBytes($response)
-            $stream.Write($responseBytes, 0, $responseBytes.Length)
-            $stream.Write($bodyBytes, 0, $bodyBytes.Length)
+            $method = $parts[0]
+            $url = $parts[1]
+            
+            # Map URL to file path
+            $filePath = Join-Path $Root ($url -replace '^\/*', '')
+            
+            # Security: Ensure resolved path is within root directory
+            try {
+                $resolvedPath = (Get-Item $filePath).FullName
+                $rootPath = (Get-Item $Root).FullName
+                if (-not $resolvedPath.StartsWith($rootPath)) {
+                    Write-Host "[WARN] Blocked directory traversal attempt: $url" -ForegroundColor Yellow
+                    $response = "HTTP/1.1 403 Forbidden`r`nContent-Type: text/plain`r`nContent-Length: 9`r`nConnection: close`r`n`r`nForbidden"
+                    $responseBytes = [System.Text.Encoding]::ASCII.GetBytes($response)
+                    try { $stream.Write($responseBytes, 0, $responseBytes.Length) } catch {}
+                    continue
+                }
+            }
+            catch {
+                # File doesn't exist, will be handled below
+            }
+            
+            if (Test-Path $filePath -PathType Leaf) {
+                $content = Get-Content $filePath -Raw -Encoding UTF8
+                $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($content)
+                $contentType = Get-MimeType $filePath
+                
+                $response = "HTTP/1.1 200 OK`r`n"
+                $response += "Content-Type: $contentType`r`n"
+                $response += "Content-Length: $($bodyBytes.Length)`r`n"
+                $response += "Connection: close`r`n"
+                $response += "`r`n"
+                
+                $responseBytes = [System.Text.Encoding]::ASCII.GetBytes($response)
+                $combinedBytes = $responseBytes + $bodyBytes
+                try { $stream.Write($combinedBytes, 0, $combinedBytes.Length) } catch {}
+            } else {
+                $body = "File not found: $url"
+                $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
+                
+                $response = "HTTP/1.1 404 Not Found`r`n"
+                $response += "Content-Type: text/plain`r`n"
+                $response += "Content-Length: $($bodyBytes.Length)`r`n"
+                $response += "Connection: close`r`n"
+                $response += "`r`n"
+                
+                $responseBytes = [System.Text.Encoding]::ASCII.GetBytes($response)
+                $combinedBytes = $responseBytes + $bodyBytes
+                try { $stream.Write($combinedBytes, 0, $combinedBytes.Length) } catch {}
+            }
         }
-        
-        $stream.Close()
-        $client.Close()
+        finally {
+            if ($stream) { $stream.Dispose() }
+            if ($client) { $client.Dispose() }
+        }
     }
 }
 catch {

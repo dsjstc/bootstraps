@@ -196,64 +196,77 @@ elseif ($Command -eq "Start") {
         }
     }
     
-    # Start the server in the background
+    # Start the server in the background using Start-Process
     Write-Host "[INFO] Starting HTTP server on port $Port..." -ForegroundColor Cyan
     
     $startTime = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
-    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
-    $startInfo.FileName = "powershell.exe"
-    $startInfo.Arguments = "-ExecutionPolicy Bypass -NoProfile -WindowStyle Hidden -File `"$ServeScript`" -Port $Port -Root `"$Root`""
-    $startInfo.RedirectStandardOutput = $true
-    $startInfo.RedirectStandardError = $true
-    $startInfo.UseShellExecute = $false
     
-    $process = New-Object System.Diagnostics.Process
-    $process.StartInfo = $startInfo
+    # Start the server as a hidden PowerShell process
+    $escapedRoot = $RootDir.Replace('\', '\\')
+    $parentProcess = Start-Process powershell -ArgumentList "-ExecutionPolicy Bypass -NoProfile -Command `"& '$ServeScript' -Port $Port -Bind 0.0.0.0 -Root '$escapedRoot'`"" -WindowStyle Hidden -PassThru -ErrorAction Stop
     
-    if ($process.Start()) {
-        $serverPid = $process.Id
-        
-        # Write status file
-        $statusObject = [PSCustomObject]@{
-            PID = $serverPid
-            Port = $Port
-            StartTime = $startTime
-        }
-        Write-StatusFile $statusObject
-        
-        Write-Host "[OK] Server started in background (PID: $serverPid)" -ForegroundColor Green
-        Write-Host "[INFO] Waiting for server to be ready..." -ForegroundColor Gray
-        
-        # Wait for server to be ready (check port)
-        $ready = $false
-        for ($i = 0; $i -lt 20; $i++) {
-            try {
-                $tcp = New-Object System.Net.Sockets.TcpClient
-                $tcp.Connect("127.0.0.1", $Port)
-                $tcp.Close()
-                $ready = $true
-                break
-            }
-            catch {
-                Start-Sleep -Milliseconds 200
+    Write-Host "[INFO] Waiting for server to be ready..." -ForegroundColor Gray
+    
+    # Wait for server to be ready (check port) - max 5 seconds
+    $ready = $false
+    $maxWait = 5000  # 5 seconds
+    $waitStart = Get-Date
+    $serverPid = 0
+    
+    # Give the server process time to start
+    Start-Sleep -Milliseconds 500
+    
+    while ((New-TimeSpan -Start $waitStart -End (Get-Date)).TotalMilliseconds -lt $maxWait) {
+        try {
+            # Find the PowerShell process listening on this port
+            # Get-NetTCPConnection returns a CimInstance, not an array
+            $connections = Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue
+            if ($connections -and $connections.OwningProcess -ne 0) {
+                $listeningProcess = $connections.OwningProcess
+                $proc = Get-Process -Id $listeningProcess -ErrorAction Stop
+                if ($proc.MainModule.FileName -like "*powershell*") {
+                    # Verify TCP connection works
+                    $tcp = New-Object System.Net.Sockets.TcpClient
+                    $tcp.Connect("127.0.0.1", $Port)
+                    $tcp.Close()
+                    $serverPid = $listeningProcess
+                    $ready = $true
+                    break
+                }
             }
         }
-        
-        if ($ready) {
-            Write-Host ""
-            Write-Host "=== Target Machine Command ===" -ForegroundColor Cyan
-            Write-Host "On the target machine, paste this command:" -ForegroundColor Yellow
-            Write-Host ""
-            Write-Host "  $(Get-TargetCommand)" -ForegroundColor White
-            Write-Host ""
-            Write-Host "Use .\serve-bootstrap.ps1 -Command Stop to stop the server." -ForegroundColor Gray
-        }
-        else {
-            Write-Host "[WARN] Server may not be ready yet" -ForegroundColor Yellow
+        catch {
+            Start-Sleep -Milliseconds 250
         }
     }
-    else {
-        Write-Host "[ERROR] Failed to start server" -ForegroundColor Red
+    
+    if (-not $ready -or $serverPid -eq 0) {
+        # Server didn't become ready, kill the parent process
+        Write-Host "[ERROR] Server did not become ready within 5 seconds, stopping process" -ForegroundColor Red
+        try {
+            $parentProcess.Close()
+            $parentProcess.WaitForExit()
+        }
+        catch {}
         exit 1
     }
+    
+    # Write status file with the actual server PID
+    $statusObject = [PSCustomObject]@{
+        PID = $serverPid
+        Port = $Port
+        StartTime = $startTime
+    }
+    Write-StatusFile $statusObject
+    
+    Write-Host "[OK] Server started in background (PID: $serverPid)" -ForegroundColor Green
+    
+    Write-Host ""
+    Write-Host "=== Target Machine Command ===" -ForegroundColor Cyan
+    Write-Host "On the target machine, paste this command:" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "  $(Get-TargetCommand)" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Use .\serve-bootstrap.ps1 -Command Stop to stop the server." -ForegroundColor Gray
+    exit 0
 }
