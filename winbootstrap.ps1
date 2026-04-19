@@ -52,6 +52,20 @@ function Write-Fail   { param([string]$m) Write-Host "  ERROR: $m" -ForegroundCo
 function Write-Info   { param([string]$m) Write-Host "  $m" -ForegroundColor Gray; Write-Log "INFO: $m" }
 function Write-Warn   { param([string]$m) Write-Host "  WARN: $m" -ForegroundColor Yellow; Write-Log "WARN: $m" -Level "WARN" }
 
+# === Get Dev Machine IP ===
+function Get-DevMachineIP {
+    # Get local IP address for LAN access
+    $ipAddress = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object { $_.InterfaceAlias -notlike "*Loopback*" -and $_.IPAddress -notlike "127.*" } |
+        Select-Object -First 1 -ExpandProperty IPAddress
+    
+    if (-not $ipAddress) {
+        $ipAddress = "192.168.3.200"  # Default fallback
+    }
+    
+    return $ipAddress
+}
+
 # === Pause Function ===
 function Write-Pause {
     Write-Host ""
@@ -433,6 +447,18 @@ function Invoke-Bootstrap {
     Write-Header "Bootstrap Complete"
     Write-Host "Configs: $ConfigPath" -ForegroundColor Cyan
     Write-Host "SSH Key: $env:GIT_SSH_COMMAND" -ForegroundColor Cyan
+    
+    # === Echo the command to run on target machine ===
+    $devIp = Get-DevMachineIP
+    $runCommand = "powershell -ExecutionPolicy Bypass -Command `"iwr -useb http://$devIp:8080/winbootstrap.ps1 | iex`""
+    
+    Write-Host ""
+    Write-Host "=== To run this bootstrap on another machine ===" -ForegroundColor Cyan
+    Write-Host "On the target machine, run:" -ForegroundColor Yellow
+    Write-Host "  $runCommand" -ForegroundColor White
+    Write-Host ""
+    Write-Host "Make sure the dev machine's HTTP server is running on port 8080." -ForegroundColor Gray
+    
     Write-Pause
 }
 
