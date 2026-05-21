@@ -14,6 +14,17 @@ Published via GitHub Actions workflow (`.github/workflows/sync-bootstraps.yml`) 
 
 Main bootstrap script that installs prerequisites (git, Bitwarden), clones the configs repository, and runs `newpc/setup.ps1`.
 
+
+#### Dev usage
+
+For iterative development (eg, with roo-code), it is recommended to elevate vscode, and to disable uac prompting with:
+
+```
+Set-ItemProperty -Path "HKLM:\SOFTWARE\Microsoft\\Windows\CurrentVersion\Policies\System" `
+-Name "ConsentPromptBehaviorAdmin" -Value 0
+```
+
+
 #### Usage
 
 **Single-paste on virgin PC (bypasses execution policy):**
